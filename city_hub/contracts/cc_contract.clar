@@ -1,14 +1,13 @@
-;; SmartCityInfrastructure Contract - Version 2
-;; Added component history tracking and inspection framework
+;; SmartCityInfrastructure Contract
+;; Complete inspection system with security enhancements
 
 (define-trait city-infrastructure-trait
   (
     (register-component (uint uint) (response bool uint))
     (update-component-condition (uint uint) (response bool uint))
     (get-component-history (uint) (response (list 10 {condition: uint, timestamp: uint}) uint))
-    (get-component-condition (uint) (response uint uint))
-    (add-inspection-agency (principal uint) (response bool uint))
-    (add-inspection (uint uint) (response bool uint))
+    (add-inspection (uint uint principal) (response bool uint))
+    (verify-inspection (uint uint) (response bool uint))
   )
 )
 
@@ -163,12 +162,23 @@
   )
 )
 
-;; Add inspection agency
+;; Validate agency principal
+(define-private (is-valid-agency (agency principal))
+  (and 
+    (not (is-eq agency (var-get city-admin)))     ;; Agency can't be city admin
+    (not (is-eq agency tx-sender))                ;; Agency can't be the sender
+    (not (is-eq agency 'SP000000000000000000002Q6VF78))  ;; Not zero address
+  )
+)
+
+;; Add inspection agency with additional validation
 (define-public (add-inspection-agency (agency principal) (inspection-type uint))
   (begin
     (asserts! (is-city-admin tx-sender) ERR_UNAUTHORIZED)
     (asserts! (is-valid-inspection-type inspection-type) ERR_INVALID_INSPECTION)
+    (asserts! (is-valid-agency agency) ERR_UNAUTHORIZED)
     
+    ;; After validation, we can safely use the agency
     (map-set inspection-agencies
       {agency: agency, inspection-type: inspection-type}
       {approved: true}
@@ -191,15 +201,64 @@
       ERR_INSPECTION_EXISTS
     )
     
-    (map-set component-inspections
-      {component-id: component-id, inspection-type: inspection-type}
-      {
-        inspector: tx-sender,
-        timestamp: (get-current-timestamp),
-        passed: true
-      }
+    (let
+      ((validated-component-id component-id)
+       (validated-inspection-type inspection-type))
+      (map-set component-inspections
+        {component-id: validated-component-id, inspection-type: validated-inspection-type}
+        {
+          inspector: tx-sender,
+          timestamp: (get-current-timestamp),
+          passed: true
+        }
+      )
+      (ok true)
     )
-    (ok true)
+  )
+)
+
+;; Verify component inspection
+(define-read-only (verify-inspection (component-id uint) (inspection-type uint))
+  (let
+    (
+      (inspection (unwrap! 
+        (map-get? component-inspections {component-id: component-id, inspection-type: inspection-type})
+        ERR_INVALID_INSPECTION
+      ))
+    )
+    (ok (get passed inspection))
+  )
+)
+
+;; Mark inspection as failed
+(define-public (fail-inspection (component-id uint) (inspection-type uint))
+  (begin
+    (asserts! (is-valid-component-id component-id) ERR_INVALID_COMPONENT)
+    (asserts! (is-valid-inspection-type inspection-type) ERR_INVALID_INSPECTION)
+    
+    (let
+      (
+        (inspection (unwrap! 
+          (map-get? component-inspections {component-id: component-id, inspection-type: inspection-type})
+          ERR_INVALID_INSPECTION
+        ))
+        (validated-component-id component-id)
+        (validated-inspection-type inspection-type)
+      )
+      (asserts! 
+        (or
+          (is-city-admin tx-sender)
+          (is-eq (get inspector inspection) tx-sender)
+        )
+        ERR_UNAUTHORIZED
+      )
+      
+      (map-set component-inspections
+        {component-id: validated-component-id, inspection-type: validated-inspection-type}
+        (merge inspection {passed: false})
+      )
+      (ok true)
+    )
   )
 )
 
@@ -221,4 +280,9 @@
     )
     (ok (get current-condition component))
   )
+)
+
+;; Get inspection details
+(define-read-only (get-inspection-details (component-id uint) (inspection-type uint))
+  (ok (map-get? component-inspections {component-id: component-id, inspection-type: inspection-type}))
 )
